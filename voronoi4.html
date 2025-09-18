@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voronoi Region Demo</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html,body,#map{height:100%;margin:0;padding:0}
+    .controls{position:absolute;right:10px;top:10px;z-index:1000;background:white;padding:12px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,.25);width:320px;font-family:sans-serif;font-size:14px;}
+    .controls h3{margin-top:0;font-size:16px;color:#1a73e8;}
+    .controls button{display:block;margin:6px 0;width:100%;padding:6px;border:none;border-radius:6px;background:#1a73e8;color:white;cursor:pointer;font-size:14px;}
+    .controls button:hover{background:#1558b0;}
+    .controls p{font-size:12px;line-height:1.4;color:#444;}
+    .controls input{width:95%;margin:4px 0;padding:4px;font-size:13px;border:1px solid #ccc;border-radius:4px;}
+    .area-display{margin-top:8px;font-size:13px;color:#333;}
+    .site-list{margin-top:8px;max-height:120px;overflow-y:auto;border:1px solid #ddd;padding:4px;border-radius:4px;}
+    .site-item{display:flex;justify-content:space-between;align-items:center;margin:2px 0;padding:2px 0;border-bottom:1px solid #eee;font-size:13px;}
+    .site-item:last-child{border-bottom:none;}
+    .remove-btn{background:#e53935;color:white;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:12px;}
+    .remove-btn:hover{background:#c62828;}
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div class="controls">
+  <h3>Voronoi Region Demo</h3>
+  <p><b>Click map</b> = set focus (blue).<br><b>Shift+Click map</b> = add competitor site (red).</p>
+
+  <label><b>Focus location (lat,lng or place)</b></label>
+  <input id="focusInput" placeholder="e.g. 41.8625,-87.6166 or Soldier Field Chicago">
+  <button id="setFocusBtn">Set Focus</button>
+
+  <label><b>Competitor location (lat,lng or place)</b></label>
+  <input id="siteInput" placeholder="e.g. 38.8977,-77.0365 or White House DC">
+  <button id="addSiteBtn">Add Site</button>
+
+  <div class="site-list" id="siteList"></div>
+
+  <button id="resetBtn">Load Soldier Field Example</button>
+  <button id="computeBtn">Compute Focus Region</button>
+  <button id="exportBtn">Export JSON</button>
+  <div id="areaDisplay" class="area-display"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+<script>
+const EXAMPLES = {
+  soldier_field: [41.8625, -87.6166],
+  white_house: [38.8977, -77.0365],
+  stl_arch: [38.6247, -90.1848],
+  alamo: [29.425967, -98.486142],
+  everglades: [25.2866, -80.8987],
+  chicago_botanic: [42.1220, -87.7816]
+};
+
+const map = L.map('map').setView([39.5, -90], 5);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenStreetMap'}).addTo(map);
+
+let focusMarker = null;
+let focusMeta = null;
+let siteMarkers = [];
+let siteMeta = [];
+let voronoiLayer = null;
+let highlightLayer = null;
+
+function clearAll(){
+  if(focusMarker) { map.removeLayer(focusMarker); focusMarker=null; focusMeta=null; }
+  siteMarkers.forEach(m=>map.removeLayer(m)); siteMarkers=[]; siteMeta=[];
+  if(voronoiLayer) { map.removeLayer(voronoiLayer); voronoiLayer=null; }
+  if(highlightLayer) { map.removeLayer(highlightLayer); highlightLayer=null; }
+  document.getElementById('areaDisplay').innerText = '';
+  renderSiteList();
+}
+
+function loadExample(){
+  clearAll();
+  focusMarker = L.marker(EXAMPLES.soldier_field).addTo(map).bindPopup('Focus: Soldier Field');
+  focusMeta = {userInput:"Soldier Field Chicago", matchedLocationName:"Soldier Field", coords:EXAMPLES.soldier_field};
+  const others = [
+    {coords:EXAMPLES.white_house, userInput:"White House DC", matchedLocationName:"White House"},
+    {coords:EXAMPLES.stl_arch, userInput:"St. Louis Arch", matchedLocationName:"Gateway Arch"},
+    {coords:EXAMPLES.alamo, userInput:"The Alamo", matchedLocationName:"The Alamo"},
+    {coords:EXAMPLES.everglades, userInput:"Everglades", matchedLocationName:"Everglades National Park"},
+    {coords:EXAMPLES.chicago_botanic, userInput:"Chicago Botanic Gardens", matchedLocationName:"Chicago Botanic Garden"}
+  ];
+  others.forEach((o,i)=>{
+    const mm = L.marker(o.coords,{icon: redIcon()}).addTo(map).bindPopup(o.matchedLocationName);
+    siteMarkers.push(mm);
+    siteMeta.push({...o});
+  });
+  renderSiteList();
+  map.setView(EXAMPLES.soldier_field,5.5);
+}
+
+function redIcon(){
+  return L.divIcon({className:'custom-icon',html:'<div style="width:10px;height:10px;background:red;border-radius:50%"></div>'});
+}
+function blueIcon(){
+  return L.divIcon({className:'custom-icon',html:'<div style="width:14px;height:14px;background:blue;border-radius:50%"></div>'});
+}
+
+map.on('click', function(e){
+  if(e.originalEvent.shiftKey){
+    const m = L.marker(e.latlng,{icon: redIcon()}).addTo(map).bindPopup('Extra site');
+    siteMarkers.push(m);
+    siteMeta.push({userInput:`${e.latlng.lat},${e.latlng.lng}`, matchedLocationName:`[${e.latlng.lat.toFixed(4)},${e.latlng.lng.toFixed(4)}]`, coords:[e.latlng.lat,e.latlng.lng]});
+    renderSiteList();
+    if(highlightLayer) computeVoronoiRegion();
+  } else {
+    if(focusMarker) map.removeLayer(focusMarker);
+    focusMarker = L.marker(e.latlng,{icon: blueIcon()}).addTo(map).bindPopup('Focus');
+    focusMeta = {userInput:`${e.latlng.lat},${e.latlng.lng}`, matchedLocationName:`[${e.latlng.lat.toFixed(4)},${e.latlng.lng.toFixed(4)}]`, coords:[e.latlng.lat,e.latlng.lng]};
+    if(highlightLayer) computeVoronoiRegion();
+  }
+});
+
+function computeVoronoiRegion(){
+  if(!focusMarker){ alert('Set a focus.'); return; }
+  if(siteMarkers.length === 0){ alert('Add competitor sites.'); return; }
+
+  const pts = [];
+  siteMeta.forEach((sm)=>{
+    pts.push(turf.point([sm.coords[1], sm.coords[0]], {type:'other'}));
+  });
+  const focus = focusMeta.coords;
+  const focusPt = turf.point([focus[1], focus[0]], {type:'focus'});
+  pts.push(focusPt);
+
+  const fc = turf.featureCollection(pts);
+  const mb = map.getBounds();
+  const bbox = [mb.getWest()-10, mb.getSouth()-10, mb.getEast()+10, mb.getNorth()+10];
+  const vor = turf.voronoi(fc, {bbox: bbox});
+  if(!vor){ alert('Voronoi failed.'); return; }
+
+  if(voronoiLayer) map.removeLayer(voronoiLayer);
+  voronoiLayer = L.geoJSON(vor, {style: {color:'#666', weight:1, fillOpacity:0.05}}).addTo(map);
+
+  let chosen = null;
+  for(const feat of vor.features){
+    if(turf.booleanPointInPolygon(focusPt, feat)){
+      chosen = feat; break;
+    }
+  }
+
+  if(!chosen){ alert('Could not find focus polygon.'); return; }
+  if(highlightLayer) map.removeLayer(highlightLayer);
+  highlightLayer = L.geoJSON(chosen, {style:{color:'#1a73e8',weight:2,fillOpacity:0.25}}).addTo(map);
+  map.fitBounds(L.geoJSON(chosen).getBounds(), {maxZoom:8});
+
+  const areaSqKm = turf.area(chosen)/1e6;
+  const areaSqMi = areaSqKm * 0.386102;
+  document.getElementById('areaDisplay').innerText = `Area of region: ${areaSqKm.toFixed(2)} sq km (${areaSqMi.toFixed(2)} sq mi)`;
+  highlightLayer.featureData = chosen;
+}
+
+function exportJSON(){
+  if(!highlightLayer){ alert('No region to export.'); return; }
+  const data = {
+    focus: focusMeta,
+    competitors: siteMeta,
+    regionGeoJSON: highlightLayer.featureData
+  };
+  const str = JSON.stringify(data, null, 2);
+  const blob = new Blob([str], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='focus_region.json'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function geocode(query){
+  const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if(data.length===0) throw new Error('Location not found');
+  return {coords:[parseFloat(data[0].lat), parseFloat(data[0].lon)], matched:data[0].display_name};
+}
+
+document.getElementById('setFocusBtn').addEventListener('click', async ()=>{
+  const val = document.getElementById('focusInput').value.trim();
+  if(!val) return;
+  try{
+    let coords, matched;
+    if(val.includes(',')){
+      const parts = val.split(',').map(x=>parseFloat(x));
+      if(parts.length!==2 || parts.some(isNaN)) throw new Error('Invalid coordinates');
+      coords = parts; matched = `[${parts[0]},${parts[1]}]`;
+    } else {
+      const g = await geocode(val); coords = g.coords; matched = g.matched;
+    }
+    if(focusMarker) map.removeLayer(focusMarker);
+    focusMarker = L.marker(coords,{icon: blueIcon()}).addTo(map).bindPopup('Focus');
+    focusMeta = {userInput:val, matchedLocationName:matched, coords:coords};
+    map.setView(coords,6);
+    if(highlightLayer) computeVoronoiRegion();
+  } catch(err){ alert(err.message); }
+});
+
+document.getElementById('addSiteBtn').addEventListener('click', async ()=>{
+  const val = document.getElementById('siteInput').value.trim();
+  if(!val) return;
+  try{
+    let coords, matched;
+    if(val.includes(',')){
+      const parts = val.split(',').map(x=>parseFloat(x));
+      if(parts.length!==2 || parts.some(isNaN)) throw new Error('Invalid coordinates');
+      coords = parts; matched = `[${parts[0]},${parts[1]}]`;
+    } else {
+      const g = await geocode(val); coords = g.coords; matched = g.matched;
+    }
+    const m = L.marker(coords,{icon: redIcon()}).addTo(map).bindPopup(matched);
+    siteMarkers.push(m);
+    siteMeta.push({userInput:val, matchedLocationName:matched, coords:coords});
+    renderSiteList();
+    if(highlightLayer) computeVoronoiRegion();
+  } catch(err){ alert(err.message); }
+});
+
+document.getElementById('resetBtn').addEventListener('click', loadExample);
+document.getElementById('computeBtn').addEventListener('click', computeVoronoiRegion);
+document.getElementById('exportBtn').addEventListener('click', exportJSON);
+
+function renderSiteList(){
+  const container = document.getElementById('siteList');
+  container.innerHTML = '';
+  siteMeta.forEach((s,i)=>{
+    const div = document.createElement('div'); div.className='site-item';
+    div.innerHTML = `<span>${s.userInput} → ${s.matchedLocationName}</span>`;
+    const btn = document.createElement('button'); btn.className='remove-btn'; btn.innerText='Remove';
+    btn.addEventListener('click', ()=>{
+      map.removeLayer(siteMarkers[i]);
+      siteMarkers.splice(i,1);
+      siteMeta.splice(i,1);
+      renderSiteList();
+      if(highlightLayer) computeVoronoiRegion();
+    });
+    div.appendChild(btn);
+    container.appendChild(div);
+  });
+}
+
+loadExample();
+</script>
+</body>
+</html>
