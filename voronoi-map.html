@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voronoi Region — Closer to Focus than Others</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html,body,#map{height:100%;margin:0;padding:0}
+    .controls{position:absolute;right:10px;top:10px;z-index:1000;background:white;padding:8px;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.2);}
+    .controls button{display:block;margin:6px 0;width:100%}
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div class="controls">
+  <strong>Voronoi region demo</strong>
+  <div style="font-size:12px;margin-top:6px">Click the map to set the <em>focus</em> (blue). Click map while holding Shift to add alternate sites (red).</div>
+  <button id="resetBtn">Reset to example (Soldier Field + others)</button>
+  <button id="computeBtn">Compute region closest to focus</button>
+  <button id="exportBtn">Export GeoJSON of highlighted region</button>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+<script>
+// Example coordinates (lat, lng)
+const EXAMPLES = {
+  soldier_field: [41.8625, -87.6166],
+  white_house: [38.8977, -77.0365],
+  stl_arch: [38.6247, -90.1848],
+  alamo: [29.425967, -98.486142],
+  everglades: [25.2866, -80.8987],
+  chicago_botanic: [42.1220, -87.7816]
+};
+
+// Setup map
+const map = L.map('map').setView([39.5, -90], 5);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenStreetMap'}).addTo(map);
+
+let focusMarker = null;
+let siteMarkers = [];
+let voronoiLayer = null;
+let highlightLayer = null;
+
+function addMarker(latlng, options){
+  const m = L.marker(latlng, options).addTo(map);
+  siteMarkers.push(m);
+  return m;
+}
+
+function clearAll(){
+  if(focusMarker) { map.removeLayer(focusMarker); focusMarker=null; }
+  siteMarkers.forEach(m=>map.removeLayer(m)); siteMarkers=[];
+  if(voronoiLayer) { map.removeLayer(voronoiLayer); voronoiLayer=null; }
+  if(highlightLayer) { map.removeLayer(highlightLayer); highlightLayer=null; }
+}
+
+function loadExample(){
+  clearAll();
+  // focus: Soldier Field (blue)
+  focusMarker = L.marker(EXAMPLES.soldier_field,{icon: L.icon({iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png', iconAnchor:[12,41]})}).addTo(map).bindPopup('Focus: Soldier Field');
+  // other sites (red)
+  const others = [EXAMPLES.white_house, EXAMPLES.stl_arch, EXAMPLES.alamo, EXAMPLES.everglades, EXAMPLES.chicago_botanic];
+  others.forEach((c,i)=>{
+    const mm = L.marker(c).addTo(map).bindPopup('Site '+(i+1));
+    siteMarkers.push(mm);
+  });
+  map.setView(EXAMPLES.soldier_field,5.5);
+}
+
+map.on('click', function(e){
+  // if shiftKey is pressed, add as alternate site; otherwise set focus
+  if(e.originalEvent.shiftKey){
+    const m = L.marker(e.latlng).addTo(map).bindPopup('Extra site');
+    siteMarkers.push(m);
+  } else {
+    if(focusMarker) map.removeLayer(focusMarker);
+    focusMarker = L.marker(e.latlng).addTo(map).bindPopup('Focus');
+  }
+});
+
+function computeVoronoiRegion(){
+  if(!focusMarker){ alert('Set a focus by clicking the map (no Shift).'); return; }
+  if(siteMarkers.length === 0){ alert('Add at least one other site (Shift+click) or load the example.'); return; }
+
+  // build GeoJSON points: turf expects [lng,lat]
+  const pts = [];
+  // push all other sites as points
+  siteMarkers.forEach(m=>pts.push(turf.point([m.getLatLng().lng, m.getLatLng().lat], {type:'other'})));
+  // push focus last and mark
+  const focus = focusMarker.getLatLng();
+  const focusPt = turf.point([focus.lng, focus.lat], {type:'focus'});
+  pts.push(focusPt);
+
+  const fc = turf.featureCollection(pts);
+
+  // bbox: extend map bounds a bit to ensure finite polygons
+  const mb = map.getBounds();
+  const bbox = [mb.getWest()-10, mb.getSouth()-10, mb.getEast()+10, mb.getNorth()+10];
+
+  // compute voronoi
+  const vor = turf.voronoi(fc, {bbox: bbox});
+  if(!vor){ alert('Voronoi failed (maybe too small bbox).'); return; }
+
+  // show all voronoi polygons lightly
+  if(voronoiLayer) map.removeLayer(voronoiLayer);
+  voronoiLayer = L.geoJSON(vor, {style: {color:'#888', weight:1, fillOpacity:0.05}}).addTo(map);
+
+  // find which polygon contains the focus point
+  let chosen = null;
+  for(const feat of vor.features){
+    if(turf.booleanPointInPolygon(focusPt, feat)){
+      chosen = feat; break;
+    }
+  }
+
+  if(!chosen){
+    alert('Could not find the focus polygon. Try zooming out or move the map.');
+    return;
+  }
+
+  // highlight chosen polygon
+  if(highlightLayer) map.removeLayer(highlightLayer);
+  highlightLayer = L.geoJSON(chosen, {style:{color:'#1a73e8',weight:2,fillOpacity:0.25}}).addTo(map);
+  // fit map to polygon
+  const poly = chosen;
+  try{ map.fitBounds(L.geoJSON(poly).getBounds(), {maxZoom:8}); }catch(e){}
+
+  // attach popup listing the sites and distances to demonstrate property
+  const otherCoords = pts.filter(p=>p.properties.type==='other').map(p=>p.geometry.coordinates);
+  const distances = otherCoords.map(c=>{
+    const d = turf.distance(focusPt, turf.point(c), {units:'miles'});
+    return Math.round(d*10)/10 + ' mi';
+  });
+
+  highlightLayer.bindPopup('Region closer to focus than any other site.\nDistances from focus to other sites: '+distances.join(', '));
+}
+
+// export selected polygon as GeoJSON
+function exportGeoJSON(){
+  if(!highlightLayer){ alert('No highlighted region to export. Compute first.'); return; }
+  const gj = highlightLayer.toGeoJSON();
+  const str = JSON.stringify(gj);
+  const blob = new Blob([str], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='focus_region.geojson'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// wire buttons
+document.getElementById('resetBtn').addEventListener('click', loadExample);
+document.getElementById('computeBtn').addEventListener('click', computeVoronoiRegion);
+document.getElementById('exportBtn').addEventListener('click', exportGeoJSON);
+
+// initial load
+loadExample();
+</script>
+</body>
+</html>

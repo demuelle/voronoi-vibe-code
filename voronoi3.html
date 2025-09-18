@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voronoi Region Demo</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html,body,#map{height:100%;margin:0;padding:0}
+    .controls{position:absolute;right:10px;top:10px;z-index:1000;background:white;padding:12px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,.25);width:300px;font-family:sans-serif;font-size:14px;}
+    .controls h3{margin-top:0;font-size:16px;color:#1a73e8;}
+    .controls button{display:block;margin:8px 0;width:100%;padding:6px;border:none;border-radius:6px;background:#1a73e8;color:white;cursor:pointer;font-size:14px;}
+    .controls button:hover{background:#1558b0;}
+    .controls p{font-size:12px;line-height:1.4;color:#444;}
+    .controls input{width:95%;margin:4px 0;padding:4px;font-size:13px;border:1px solid #ccc;border-radius:4px;}
+    .area-display{margin-top:8px;font-size:13px;color:#333;}
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div class="controls">
+  <h3>Voronoi Region Demo</h3>
+  <p><b>Click map</b> = set focus (blue).<br><b>Shift+Click map</b> = add competitor site (red).</p>
+
+  <label><b>Focus location (lat,lng or place)</b></label>
+  <input id="focusInput" placeholder="e.g. 41.8625,-87.6166 or Soldier Field Chicago">
+  <button id="setFocusBtn">Set Focus</button>
+
+  <label><b>Competitor location (lat,lng or place)</b></label>
+  <input id="siteInput" placeholder="e.g. 38.8977,-77.0365 or White House DC">
+  <button id="addSiteBtn">Add Site</button>
+
+  <button id="resetBtn">Load Soldier Field Example</button>
+  <button id="computeBtn">Compute Focus Region</button>
+  <button id="exportBtn">Export Highlighted Region</button>
+  <div id="areaDisplay" class="area-display"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+<script>
+const EXAMPLES = {
+  soldier_field: [41.8625, -87.6166],
+  white_house: [38.8977, -77.0365],
+  stl_arch: [38.6247, -90.1848],
+  alamo: [29.425967, -98.486142],
+  everglades: [25.2866, -80.8987],
+  chicago_botanic: [42.1220, -87.7816]
+};
+
+const map = L.map('map').setView([39.5, -90], 5);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenStreetMap'}).addTo(map);
+
+let focusMarker = null;
+let siteMarkers = [];
+let voronoiLayer = null;
+let highlightLayer = null;
+
+function clearAll(){
+  if(focusMarker) { map.removeLayer(focusMarker); focusMarker=null; }
+  siteMarkers.forEach(m=>map.removeLayer(m)); siteMarkers=[];
+  if(voronoiLayer) { map.removeLayer(voronoiLayer); voronoiLayer=null; }
+  if(highlightLayer) { map.removeLayer(highlightLayer); highlightLayer=null; }
+  document.getElementById('areaDisplay').innerText = '';
+}
+
+function loadExample(){
+  clearAll();
+  focusMarker = L.marker(EXAMPLES.soldier_field).addTo(map).bindPopup('Focus: Soldier Field');
+  const others = [EXAMPLES.white_house, EXAMPLES.stl_arch, EXAMPLES.alamo, EXAMPLES.everglades, EXAMPLES.chicago_botanic];
+  others.forEach((c,i)=>{
+    const mm = L.marker(c,{icon: L.divIcon({className:'custom-icon',html:'<div style="width:10px;height:10px;background:red;border-radius:50%"></div>'})}).addTo(map).bindPopup('Site '+(i+1));
+    siteMarkers.push(mm);
+  });
+  map.setView(EXAMPLES.soldier_field,5.5);
+}
+
+map.on('click', function(e){
+  if(e.originalEvent.shiftKey){
+    const m = L.marker(e.latlng,{icon: L.divIcon({className:'custom-icon',html:'<div style="width:10px;height:10px;background:red;border-radius:50%"></div>'})}).addTo(map).bindPopup('Extra site');
+    siteMarkers.push(m);
+  } else {
+    if(focusMarker) map.removeLayer(focusMarker);
+    focusMarker = L.marker(e.latlng,{icon: L.divIcon({className:'custom-icon',html:'<div style="width:14px;height:14px;background:blue;border-radius:50%"></div>'})}).addTo(map).bindPopup('Focus');
+  }
+});
+
+function computeVoronoiRegion(){
+  if(!focusMarker){ alert('Set a focus.'); return; }
+  if(siteMarkers.length === 0){ alert('Add competitor sites.'); return; }
+
+  const pts = [];
+  siteMarkers.forEach(m=>pts.push(turf.point([m.getLatLng().lng, m.getLatLng().lat], {type:'other'})));
+  const focus = focusMarker.getLatLng();
+  const focusPt = turf.point([focus.lng, focus.lat], {type:'focus'});
+  pts.push(focusPt);
+
+  const fc = turf.featureCollection(pts);
+  const mb = map.getBounds();
+  const bbox = [mb.getWest()-10, mb.getSouth()-10, mb.getEast()+10, mb.getNorth()+10];
+  const vor = turf.voronoi(fc, {bbox: bbox});
+  if(!vor){ alert('Voronoi failed.'); return; }
+
+  if(voronoiLayer) map.removeLayer(voronoiLayer);
+  voronoiLayer = L.geoJSON(vor, {style: {color:'#666', weight:1, fillOpacity:0.05}}).addTo(map);
+
+  let chosen = null;
+  for(const feat of vor.features){
+    if(turf.booleanPointInPolygon(focusPt, feat)){
+      chosen = feat; break;
+    }
+  }
+
+  if(!chosen){ alert('Could not find focus polygon.'); return; }
+  if(highlightLayer) map.removeLayer(highlightLayer);
+  highlightLayer = L.geoJSON(chosen, {style:{color:'#1a73e8',weight:2,fillOpacity:0.25}}).addTo(map);
+  map.fitBounds(L.geoJSON(chosen).getBounds(), {maxZoom:8});
+
+  const areaSqKm = turf.area(chosen)/1e6;
+  const areaSqMi = areaSqKm * 0.386102;
+  document.getElementById('areaDisplay').innerText = `Area of region: ${areaSqKm.toFixed(2)} sq km (${areaSqMi.toFixed(2)} sq mi)`;
+}
+
+function exportGeoJSON(){
+  if(!highlightLayer){ alert('No region to export.'); return; }
+  const gj = highlightLayer.toGeoJSON();
+  const str = JSON.stringify(gj);
+  const blob = new Blob([str], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='focus_region.geojson'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Geocoding helper using Nominatim
+async function geocode(query){
+  const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if(data.length===0) throw new Error('Location not found');
+  return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+}
+
+// Input handling
+document.getElementById('setFocusBtn').addEventListener('click', async ()=>{
+  const val = document.getElementById('focusInput').value.trim();
+  if(!val) return;
+  try{
+    let coords;
+    if(val.includes(',')){
+      const parts = val.split(',').map(x=>parseFloat(x));
+      if(parts.length!==2 || parts.some(isNaN)) throw new Error('Invalid coordinates');
+      coords = parts;
+    } else {
+      coords = await geocode(val);
+    }
+    if(focusMarker) map.removeLayer(focusMarker);
+    focusMarker = L.marker(coords,{icon: L.divIcon({className:'custom-icon',html:'<div style="width:14px;height:14px;background:blue;border-radius:50%"></div>'})}).addTo(map).bindPopup('Focus');
+    map.setView(coords,6);
+  } catch(err){ alert(err.message); }
+});
+
+document.getElementById('addSiteBtn').addEventListener('click', async ()=>{
+  const val = document.getElementById('siteInput').value.trim();
+  if(!val) return;
+  try{
+    let coords;
+    if(val.includes(',')){
+      const parts = val.split(',').map(x=>parseFloat(x));
+      if(parts.length!==2 || parts.some(isNaN)) throw new Error('Invalid coordinates');
+      coords = parts;
+    } else {
+      coords = await geocode(val);
+    }
+    const m = L.marker(coords,{icon: L.divIcon({className:'custom-icon',html:'<div style="width:10px;height:10px;background:red;border-radius:50%"></div>'})}).addTo(map).bindPopup('Site');
+    siteMarkers.push(m);
+  } catch(err){ alert(err.message); }
+});
+
+document.getElementById('resetBtn').addEventListener('click', loadExample);
+document.getElementById('computeBtn').addEventListener('click', computeVoronoiRegion);
+document.getElementById('exportBtn').addEventListener('click', exportGeoJSON);
+
+loadExample();
+</script>
+</body>
+</html>
