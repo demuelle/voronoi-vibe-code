@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Voronoi Map with Save/Load</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+  <style>
+    body { margin:0; display:flex; height:100vh; font-family:sans-serif; }
+    #map { flex:1; }
+    #controls { width:320px; overflow:auto; background:#f8f8f8; padding:10px; box-sizing:border-box; }
+    h2 { margin:6px 0; font-size:16px; }
+    input, select, button, textarea { width:100%; margin:4px 0; }
+    ul { list-style:none; padding:0; }
+    li { margin:2px 0; }
+    .comp-item { display:flex; justify-content:space-between; align-items:center; }
+    .comp-item button { flex:0 0 auto; }
+    textarea { height:100px; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <h2>Focus Location</h2>
+    <input id="focusInput" placeholder="Name or lat,lng"/>
+    <button id="setFocus">Set Focus</button>
+
+    <h2>Add Competitor</h2>
+    <input id="competitorInput" placeholder="Name or lat,lng"/>
+    <button id="addCompetitor">Add Competitor</button>
+
+    <h2>Competitors</h2>
+    <ul id="competitorList"></ul>
+
+    <button id="computeRegion">Compute Region</button>
+    <div id="areaDisplay"></div>
+
+    <h2>Save / Load</h2>
+    <input id="saveName" placeholder="Save name"/>
+    <button id="saveMap">Save Map</button>
+
+    <select id="savedMaps"></select>
+    <button id="loadMap">Load Map</button>
+    <button id="deleteMap">Delete Map</button>
+
+    <h2>Import JSON</h2>
+    <button id="pasteJSON">Paste JSON</button>
+    <textarea id="jsonPasteArea" style="display:none"></textarea>
+    <button id="loadPastedJSON" style="display:none">Load Pasted JSON</button>
+
+    <input type="file" id="fileInput" accept=".json"/>
+  </div>
+  <div id="map"></div>
+
+  <script>
+    const map = L.map('map').setView([41.8781, -87.6298], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution:'© OpenStreetMap'
+    }).addTo(map);
+
+    let focus = null;
+    let competitors = [];
+    let focusMarker = null;
+    let compMarkers = [];
+    let regionLayer = null;
+
+    // Geocode or parse coords
+    async function lookupLocation(input) {
+      input = input.trim();
+      if (/^-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?$/.test(input)) {
+        const [lat,lng] = input.split(',').map(Number);
+        return { userInput: input, matchedLocationName: input, lat, lng };
+      } else {
+        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(input)}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.length > 0) {
+          return {
+            userInput: input,
+            matchedLocationName: data[0].display_name,
+            lat: parseFloat(data[0].lat),
+            lng: parseFloat(data[0].lon)
+          };
+        } else {
+          alert("Location not found: " + input);
+          return null;
+        }
+      }
+    }
+
+    function updateCompetitorList() {
+      const list = document.getElementById('competitorList');
+      list.innerHTML = '';
+      competitors.forEach((c,i)=>{
+        const li = document.createElement('li');
+        li.className='comp-item';
+        li.textContent = c.userInput + " ("+c.matchedLocationName+") ";
+        const btn = document.createElement('button');
+        btn.textContent="Remove";
+        btn.onclick=()=>{
+          competitors.splice(i,1);
+          map.removeLayer(compMarkers[i]);
+          compMarkers.splice(i,1);
+          updateCompetitorList();
+          if(regionLayer) computeRegion();
+        };
+        li.appendChild(btn);
+        list.appendChild(li);
+      });
+    }
+
+    document.getElementById('setFocus').onclick=async()=>{
+      const input=document.getElementById('focusInput').value;
+      const loc=await lookupLocation(input);
+      if(!loc) return;
+      focus=loc;
+      if(focusMarker) map.removeLayer(focusMarker);
+      focusMarker=L.marker([loc.lat,loc.lng],{title:loc.matchedLocationName}).addTo(map);
+      map.setView([loc.lat,loc.lng],6);
+    };
+
+    document.getElementById('addCompetitor').onclick=async()=>{
+      const input=document.getElementById('competitorInput').value;
+      const loc=await lookupLocation(input);
+      if(!loc) return;
+      competitors.push(loc);
+      const marker=L.marker([loc.lat,loc.lng],{title:loc.matchedLocationName}).addTo(map);
+      compMarkers.push(marker);
+      updateCompetitorList();
+    };
+
+    function computeRegion(){
+      if(!focus||competitors.length===0){ alert("Need focus and competitors"); return; }
+      if(regionLayer) map.removeLayer(regionLayer);
+
+      const sites=[focus,...competitors].map(s=>turf.point([s.lng,s.lat]));
+      const fc=turf.featureCollection(sites);
+      const bbox=[-180,-90,180,90];
+      const vor=turf.voronoi(fc,{bbox});
+      let focusPoly=null;
+      vor.features.forEach((f,i)=>{
+        if(!f) return;
+        const coords=f.geometry.coordinates[0];
+        const [lng,lat]=coords[0];
+        if(turf.booleanPointEqual(sites[i],turf.point([lng,lat]))){/* not correct check */}
+        if(i===0) focusPoly=f;
+      });
+      if(!focusPoly){ alert("Could not compute region"); return; }
+      regionLayer=L.geoJSON(focusPoly,{style:{color:'red',fillOpacity:0.3}}).addTo(map);
+
+      const area_km2=turf.area(focusPoly)/1e6;
+      const area_mi2=area_km2*0.386102;
+      document.getElementById('areaDisplay').textContent=
+        "Area: "+area_km2.toFixed(2)+" km² ("+area_mi2.toFixed(2)+" mi²)";
+    }
+
+    document.getElementById('computeRegion').onclick=computeRegion;
+
+    function getCurrentJSON(){
+      return {
+        focus, competitors,
+        region: regionLayer?regionLayer.toGeoJSON():null
+      };
+    }
+
+    document.getElementById('saveMap').onclick=()=>{
+      const name=document.getElementById('saveName').value.trim();
+      if(!name){alert("Enter a name");return;}
+      const json=getCurrentJSON();
+      localStorage.setItem("voronoi_"+name,JSON.stringify(json));
+      refreshSavedMaps();
+    };
+
+    function refreshSavedMaps(){
+      const sel=document.getElementById('savedMaps');
+      sel.innerHTML='';
+      for(let i=0;i<localStorage.length;i++){
+        const key=localStorage.key(i);
+        if(key.startsWith("voronoi_")){
+          const opt=document.createElement('option');
+          opt.value=key;
+          opt.textContent=key.replace("voronoi_","");
+          sel.appendChild(opt);
+        }
+      }
+    }
+    refreshSavedMaps();
+
+    function clearMap(){
+      if(focusMarker){map.removeLayer(focusMarker);focusMarker=null;}
+      compMarkers.forEach(m=>map.removeLayer(m));
+      compMarkers=[];
+      competitors=[];
+      focus=null;
+      updateCompetitorList();
+      if(regionLayer){map.removeLayer(regionLayer);regionLayer=null;}
+      document.getElementById('areaDisplay').textContent="";
+    }
+
+    function loadJSONData(json){
+      clearMap();
+      if(json.focus){
+        focus=json.focus;
+        focusMarker=L.marker([focus.lat,focus.lng],{title:focus.matchedLocationName}).addTo(map);
+        map.setView([focus.lat,focus.lng],6);
+      }
+      if(json.competitors){
+        json.competitors.forEach(c=>{
+          competitors.push(c);
+          const marker=L.marker([c.lat,c.lng],{title:c.matchedLocationName}).addTo(map);
+          compMarkers.push(marker);
+        });
+      }
+      updateCompetitorList();
+      if(json.region){
+        regionLayer=L.geoJSON(json.region,{style:{color:'red',fillOpacity:0.3}}).addTo(map);
+      }
+    }
+
+    document.getElementById('loadMap').onclick=()=>{
+      const sel=document.getElementById('savedMaps');
+      if(!sel.value){alert("No saved map selected");return;}
+      const data=JSON.parse(localStorage.getItem(sel.value));
+      loadJSONData(data);
+    };
+
+    document.getElementById('deleteMap').onclick=()=>{
+      const sel=document.getElementById('savedMaps');
+      if(!sel.value){alert("No saved map selected");return;}
+      localStorage.removeItem(sel.value);
+      refreshSavedMaps();
+    };
+
+    document.getElementById('pasteJSON').onclick=()=>{
+      document.getElementById('jsonPasteArea').style.display='block';
+      document.getElementById('loadPastedJSON').style.display='block';
+    };
+    document.getElementById('loadPastedJSON').onclick=()=>{
+      try{
+        const text=document.getElementById('jsonPasteArea').value;
+        const data=JSON.parse(text);
+        loadJSONData(data);
+      }catch(e){alert("Invalid JSON");}
+    };
+
+    document.getElementById('fileInput').onchange=(e)=>{
+      const file=e.target.files[0];
+      if(!file) return;
+      const reader=new FileReader();
+      reader.onload=(evt)=>{
+        try{
+          const data=JSON.parse(evt.target.result);
+          loadJSONData(data);
+        }catch(e){alert("Invalid file JSON");}
+      };
+      reader.readAsText(file);
+    };
+  </script>
+</body>
+</html>
